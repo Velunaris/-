@@ -1,0 +1,270 @@
+适用于esp8266的mqtt双端对话无阻塞并行与状态机指令反馈并覆盖—抽象层程序核心思想
+  对于硬件资源极其有限的esp8266开发板，复杂的控制程序并不能使用Delay（）函数。该函数将严重拖缓单片机的运行。因此，这里主要探讨状态机，定时器/计时器和网络端指令如何合理配合与安排。
+  首先确定最重要的控制单位，以这个程序为例子，我们定状态机setmode为最高控制，状态机收到物理按钮的完全控制和mqtt端的部分控制。
+  三个状态机的定义如图：0状态：自动；1状态：全开（限时）；2状态：全关（不接受mqtt指令）；3状态：mqtt控制。
+  定时器：在第一版程序完成时，程序会卡在一个不确定的位置，随后加入了简单定时器以错开判断语句的执行周期，确保在人无法感知的情况下程序运行，实现伪并行。
+  A0之所以要单独使用一个定时器，因为在setmode为0时，需要一直读取A0进行比较，导致esp8266一直处于读取状态，故此用定时器使其每隔50ms更新一次读取值（该值用变量保存）。实际上，对于较多频率读取的引脚，都建议使用定时器。
+  系统运行时与Timecounter：该定时器为通用定时器。并且受到条件控制。原理：取系统运行的时间保存到变量Timecounter里。当不满足条件时，Timecounter重新赋值为系统运行的时间（重置），判断语句时，只需要用当前系统运行时间减去变量记录的时间即可。代码示意
+if ()/*启动条件*/
+ {
+      if (millis() - timecounter >= 3000) /*减法计时器*/
+{
+        client.publish(String(String(mqtt_username) +"/"+ String(project) +"/"+ String("con")).c_str(),String("该房间长时间没有人").c_str());
+
+      }
+      if (millis() - timecounter >= 5000)
+ {
+        client.publish(String(String(mqtt_username) +"/"+ String(project) +"/"+ String("con")).c_str(),String("已切换自动模式").c_str());
+        setmod = 0;
+        timecounter = millis();/*重赋值*/
+
+      }
+
+    } else {
+      timecounter = millis();/*不满足条件也要重赋值*/
+
+    }
+  指令的反馈与覆盖：mqtt的特性为设备发出我消息，设备本身也会收到。并且最后一条指令会一直生效（如果没有新的文本代替）
+  通过多个控制来拉高低引脚，这个方案可作为通用控制系统的思想。通过定时器实现异步处理（实际为时间片轮转），最大化使用esp8266。下面为完整代码（基于mixly）
+  #include <ESP8266WiFi.h>
+#include <PubSubClient.h>
+
+#include <OneButton.h>
+#include <SimpleTimer.h>
+
+volatile int setmod;
+volatile int light;
+volatile int timecounter;
+const char *mqtt_broker = "mixio.mixly.cn";
+const char *mqtt_username = "yourmane"
+const char *mqtt_password = "yourpassword"
+const int mqtt_port = 1883;
+String mqtt_topic = "";
+String mqtt_data = "";
+boolean mqtt_status = false;
+String project = "con";
+
+WiFiClient espClient;
+PubSubClient client(espClient);
+void callback(char *topic, byte *payload, unsigned int length) {
+  String data = "";
+  for (int i = 0; i < length; i++) {
+    data = String(data) + String((char) payload[i]);
+  }
+  mqtt_topic = String(topic);
+  mqtt_data = data;
+  mqtt_status = true;
+}
+
+OneButton button12(12, false);
+SimpleTimer timer;
+
+void attachClick12() {
+  setmod = 0;
+  client.publish(String(String(mqtt_username) +"/"+ String(project) +"/"+ String("con")).c_str(),String("已恢复自动模式").c_str());
+}
+
+void attachDoubleClick12() {
+  setmod = 1;
+  timecounter = millis();
+  client.publish(String(String(mqtt_username) +"/"+ String(project) +"/"+ String("con")).c_str(),String("常开模式").c_str());
+}
+
+void attachLongPressStop12() {
+  setmod = 2;
+  client.publish(String(String(mqtt_username) +"/"+ String(project) +"/"+ String("con")).c_str(),String("正在维护").c_str());
+  digitalWrite(15, LOW);
+  digitalWrite(4, LOW);
+  digitalWrite(2, LOW);
+}
+
+void Simple_timer_1() {
+  light = analogRead(A0);
+}
+
+void Simple_timer_3() {
+  if (setmod == 3) {
+    if (String(mqtt_data).equals(String("1on"))) {
+      digitalWrite(4, HIGH);
+      client.publish(String(String(mqtt_username) +"/"+ String(project) +"/"+ String("con")).c_str(),String("一号i设备已开启").c_str());
+
+    } else if (String(mqtt_data).equals(String("1off"))) {
+      digitalWrite(4, LOW);
+      client.publish(String(String(mqtt_username) +"/"+ String(project) +"/"+ String("con")).c_str(),String("一号设备已关闭").c_str());
+    }
+    if (String(mqtt_data).equals(String("2on"))) {
+      digitalWrite(2, HIGH);
+      client.publish(String(String(mqtt_username) +"/"+ String(project) +"/"+ String("con")).c_str(),String("设备2已开启").c_str());
+
+    } else if (String(mqtt_data).equals(String("2off"))) {
+      digitalWrite(2, LOW);
+      client.publish(String(String(mqtt_username) +"/"+ String(project) +"/"+ String("con")).c_str(),String("设备2已关闭").c_str());
+    }
+    if (String(mqtt_data).equals(String("3on"))) {
+      digitalWrite(15, HIGH);
+      client.publish(String(String(mqtt_username) +"/"+ String(project) +"/"+ String("con")).c_str(),String("设备3已开启").c_str());
+
+    } else if (String(mqtt_data).equals(String("3off"))) {
+      digitalWrite(15, LOW);
+      client.publish(String(String(mqtt_username) +"/"+ String(project) +"/"+ String("con")).c_str(),String("设备3已关闭").c_str());
+    }
+    if (String(mqtt_data).equals(String("allon"))) {
+      digitalWrite(4, HIGH);
+      digitalWrite(15, HIGH);
+      digitalWrite(2, HIGH);
+      client.publish(String(String(mqtt_username) +"/"+ String(project) +"/"+ String("con")).c_str(),String("所有设备已开启").c_str());
+
+    } else if (String(mqtt_data).equals(String("alloff"))) {
+      digitalWrite(4, LOW);
+      digitalWrite(15, LOW);
+      digitalWrite(2, LOW);
+      client.publish(String(String(mqtt_username) +"/"+ String(project) +"/"+ String("con")).c_str(),String("所有设备已关闭").c_str());
+    }
+
+  }
+}
+
+void Simple_timer_4() {
+  if (setmod == 0) {
+    if (light <= 50) {
+      if (digitalRead(14) == 1) {
+        digitalWrite(2, HIGH);
+
+      } else {
+        digitalWrite(2, LOW);
+
+      }
+      if (digitalRead(5) == 1) {
+        digitalWrite(4, HIGH);
+
+      } else {
+        digitalWrite(4, LOW);
+
+      }
+      if (digitalRead(13) == 1) {
+        digitalWrite(15, HIGH);
+
+      } else {
+        digitalWrite(15, LOW);
+
+      }
+
+    } else {
+      digitalWrite(15, LOW);
+      digitalWrite(2, LOW);
+      digitalWrite(4, LOW);
+
+    }
+
+  }
+}
+
+void Simple_timer_2() {
+  if (setmod == 1) {
+    digitalWrite(15, HIGH);
+    digitalWrite(4, HIGH);
+    digitalWrite(2, HIGH);
+    if ((digitalRead(13) && digitalRead(5)) && digitalRead(14) == 1) {
+      if (millis() - timecounter >= 3000) {
+        client.publish(String(String(mqtt_username) +"/"+ String(project) +"/"+ String("con")).c_str(),String("该房间长时间没有人").c_str());
+
+      }
+      if (millis() - timecounter >= 5000) {
+        client.publish(String(String(mqtt_username) +"/"+ String(project) +"/"+ String("con")).c_str(),String("已切换自动模式").c_str());
+        setmod = 0;
+        timecounter = millis();
+
+      }
+
+    } else {
+      timecounter = millis();
+
+    }
+
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  WiFi.begin("gpdyzx", "GPjycyw61211@2025");
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("Local IP:");
+  Serial.print(WiFi.localIP());
+
+  setmod = 0;
+  light = 0;
+  timecounter = 0;
+  client.setServer(mqtt_broker, mqtt_port);
+client.setCallback(callback);
+while (!client.connected()) {
+  String client_id = "esp-client-";
+  client_id += String(WiFi.macAddress());
+  Serial.printf("The client %s connects to the public mqtt broker\n", client_id.c_str());
+  if (client.connect(client_id.c_str(), mqtt_username, mqtt_password)) {
+    Serial.println("Public emqx mqtt broker connected");
+    client.publish(String(String(mqtt_username) +"/"+ String(project) +"/"+ String("b640a0ce465fa2a4150c36b305c1c11b")).c_str(),String(client_id).c_str());
+  } else {
+    Serial.print("failed with state ");
+    Serial.print(client.state());
+    delay(2000);
+  }
+}
+
+  button12.attachClick(attachClick12);
+  button12.attachDoubleClick(attachDoubleClick12);
+  button12.attachLongPressStop(attachLongPressStop12);
+  pinMode(15, OUTPUT);
+  pinMode(4, OUTPUT);
+  pinMode(2, OUTPUT);
+  client.subscribe(String(String(mqtt_username) +"/"+ String(project) +"/"+ String("con")).c_str());
+  timer.setInterval(50L, Simple_timer_1);
+
+  timer.setInterval(100L, Simple_timer_3);
+
+  pinMode(14, INPUT);
+  pinMode(5, INPUT);
+  pinMode(13, INPUT);
+  timer.setInterval(51L, Simple_timer_4);
+
+  timer.setInterval(201L, Simple_timer_2);
+
+}
+
+void loop() {
+  client.loop();
+
+  button12.tick();
+  button12.tick();
+  button12.tick();
+  if (mqtt_status) {
+    if (String(mqtt_topic).equals(String(String(mqtt_username) +"/"+ String(project) +"/"+ String("con")))) {
+    Serial.println(mqtt_data);
+    if (String(mqtt_data).equals(String("conmode")) && setmod != 2) {
+      setmod = 3;
+      client.publish(String(String(mqtt_username) +"/"+ String(project) +"/"+ String("con")).c_str(),String("已切换为无线控制").c_str());
+
+    }
+    if (String(mqtt_data).equals(String("automode")) && setmod != 2) {
+      setmod = 0;
+      client.publish(String(String(mqtt_username) +"/"+ String(project) +"/"+ String("con")).c_str(),String("已切换为自动模式").c_str());
+
+    }
+    mqtt_status = false;
+    }
+  }
+
+  timer.run();
+
+  timer.run();
+
+  timer.run();
+
+  timer.run();
+
+}
+这些代码都是使用mixly3.0编译而得的
+有位同学既然想这么想盗我源码，那么我直接开源喽~
+这只是一个简单的单片机程序，肯定还有不少逻辑漏洞，感谢指正。
